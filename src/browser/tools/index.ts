@@ -4,8 +4,10 @@ import { click } from '../actions/click.js';
 import { typeText } from '../actions/type.js';
 import { scroll } from '../actions/scroll.js';
 import { selectOption, wait, goBack } from '../actions/select-wait-back.js';
-import { extractPageText, extractPrice, extractReviews } from '../extraction/extraction.js';
+import { extractPrice, extractReviews } from '../extraction/extraction.js';
 import { takeScreenshot } from '../vision/screenshot.js';
+import { takeSnapshot } from '../snapshot/snapshot.js';
+import { refStore } from '../snapshot/ref-store.js';
 import { getTabManager } from '../tabs/tab-manager.js';
 import { tabRouter } from '../tabs/tab-router.js';
 import { logger } from '../../infra/logger.js';
@@ -45,21 +47,8 @@ export interface ToolParameter {
     default?: unknown;
 }
 
-// ─── HELPER ───────────────────────────────────────────────────────────────────
-
-async function withScreenshotOnError(
-    ctx: ToolContext,
-    fn: () => Promise<ToolResult>
-): Promise<ToolResult> {
-    const result = await fn();
-    if (!result.success) {
-        try {
-            const ss = await takeScreenshot(ctx.page);
-            if (ss.base64) result.screenshot = ss.base64;
-        } catch { /* best-effort */ }
-    }
-    return result;
-}
+// NOTE: withScreenshotOnError removed — auto-attaching screenshots on every
+// error wastes tokens. The agent can explicitly use browser_screenshot to debug.
 
 // ─── TOOL 1: browser_navigate ─────────────────────────────────────────────────
 
@@ -82,18 +71,16 @@ export const browserNavigate: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await navigate(
-                ctx.page,
-                params.url as string,
-                { waitUntil: (params.wait_until as any) ?? 'domcontentloaded' }
-            );
-            return {
-                success: result.success,
-                data: { url: result.url, title: result.title },
-                error: result.error,
-            };
-        });
+        const result = await navigate(
+            ctx.page,
+            params.url as string,
+            { waitUntil: (params.wait_until as any) ?? 'domcontentloaded' }
+        );
+        return {
+            success: result.success,
+            data: { url: result.url, title: result.title },
+            error: result.error,
+        };
     },
 };
 
@@ -102,21 +89,26 @@ export const browserNavigate: BrowserTool = {
 export const browserClick: BrowserTool = {
     name: 'browser_click',
     description:
-        'Click an element on the page. Use selector (CSS) for precise targeting, or text for buttons/links with visible labels.',
+        'Click an element on the page. PREFERRED: use "ref" from browser_snapshot (e.g. "e5"). Fallbacks: CSS selector, visible text, or coordinates.',
     parameters: {
+        ref: {
+            type: 'string',
+            description: 'Ref ID from browser_snapshot (e.g. "e5") — preferred method',
+            required: false,
+        },
         selector: {
             type: 'string',
-            description: 'CSS selector of the element to click (e.g. "#add-to-cart", ".buy-now-btn")',
+            description: 'CSS selector (fallback if ref unavailable)',
             required: false,
         },
         text: {
             type: 'string',
-            description: 'Visible text of the element to click (e.g. "Add to Cart", "Buy Now")',
+            description: 'Visible text of the element to click (fallback)',
             required: false,
         },
         x: {
             type: 'number',
-            description: 'X coordinate to click (use with y, only if selector/text unavailable)',
+            description: 'X coordinate to click (use with y, last resort)',
             required: false,
         },
         y: {
@@ -126,15 +118,15 @@ export const browserClick: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await click(ctx.page, {
-                selector: params.selector as string | undefined,
-                text: params.text as string | undefined,
-                x: params.x as number | undefined,
-                y: params.y as number | undefined,
-            });
-            return { success: result.success, error: result.error };
+        const result = await click(ctx.page, {
+            ref: params.ref as string | undefined,
+            userId: ctx.userId,
+            selector: params.selector as string | undefined,
+            text: params.text as string | undefined,
+            x: params.x as number | undefined,
+            y: params.y as number | undefined,
         });
+        return { success: result.success, error: result.error };
     },
 };
 
@@ -143,12 +135,17 @@ export const browserClick: BrowserTool = {
 export const browserType: BrowserTool = {
     name: 'browser_type',
     description:
-        'Type text into an input field, search box, or form field. Clears the field first by default.',
+        'Type text into an input field, search box, or form field. PREFERRED: use "ref" from browser_snapshot. Clears the field first by default.',
     parameters: {
+        ref: {
+            type: 'string',
+            description: 'Ref ID from browser_snapshot (e.g. "e1") — preferred method',
+            required: false,
+        },
         selector: {
             type: 'string',
-            description: 'CSS selector of the input field (e.g. "#search", "input[name=q]")',
-            required: true,
+            description: 'CSS selector of the input field (fallback if ref unavailable)',
+            required: false,
         },
         text: {
             type: 'string',
@@ -162,14 +159,14 @@ export const browserType: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await typeText(ctx.page, {
-                selector: params.selector as string,
-                text: params.text as string,
-                clear: (params.clear as boolean) ?? true,
-            });
-            return { success: result.success, error: result.error };
+        const result = await typeText(ctx.page, {
+            ref: params.ref as string | undefined,
+            userId: ctx.userId,
+            selector: params.selector as string | undefined,
+            text: params.text as string,
+            clear: (params.clear as boolean) ?? true,
         });
+        return { success: result.success, error: result.error };
     },
 };
 
@@ -198,14 +195,12 @@ export const browserScroll: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await scroll(ctx.page, {
-                direction: params.direction as 'up' | 'down',
-                amount: params.amount as number | undefined,
-                selector: params.selector as string | undefined,
-            });
-            return { success: result.success, error: result.error };
+        const result = await scroll(ctx.page, {
+            direction: params.direction as 'up' | 'down',
+            amount: params.amount as number | undefined,
+            selector: params.selector as string | undefined,
         });
+        return { success: result.success, error: result.error };
     },
 };
 
@@ -213,12 +208,17 @@ export const browserScroll: BrowserTool = {
 
 export const browserSelect: BrowserTool = {
     name: 'browser_select',
-    description: 'Select an option from a dropdown/select element.',
+    description: 'Select an option from a dropdown/select element. Use ref from snapshot or CSS selector.',
     parameters: {
+        ref: {
+            type: 'string',
+            description: 'Ref ID from browser_snapshot (preferred)',
+            required: false,
+        },
         selector: {
             type: 'string',
-            description: 'CSS selector of the <select> element',
-            required: true,
+            description: 'CSS selector of the <select> element (fallback)',
+            required: false,
         },
         value: {
             type: 'string',
@@ -232,18 +232,40 @@ export const browserSelect: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await selectOption(ctx.page, {
-                selector: params.selector as string,
-                value: params.value as string | undefined,
-                label: params.label as string | undefined,
-            });
-            return {
-                success: result.success,
-                data: { selectedValue: result.selectedValue },
-                error: result.error,
-            };
+        // If using ref, resolve to selector via getByRole
+        let selectorToUse = params.selector as string | undefined;
+        if (params.ref) {
+            const entry = refStore.getRef(ctx.userId, params.ref as string);
+            // For select, we need to use getByRole which returns a locator, not a selector
+            // Fall back to page.getByRole().selectOption() directly
+            try {
+                const locator = ctx.page.getByRole(entry.role as any, { name: entry.name }).first();
+                const selected = await locator.selectOption(
+                    params.value ? { value: params.value as string } : { label: params.label as string }
+                );
+                return {
+                    success: true,
+                    data: { selectedValue: selected[0] },
+                };
+            } catch (err: any) {
+                return { success: false, error: err.message };
+            }
+        }
+
+        if (!selectorToUse) {
+            return { success: false, error: 'Must provide ref or selector' };
+        }
+
+        const result = await selectOption(ctx.page, {
+            selector: selectorToUse,
+            value: params.value as string | undefined,
+            label: params.label as string | undefined,
         });
+        return {
+            success: result.success,
+            data: { selectedValue: result.selectedValue },
+            error: result.error,
+        };
     },
 };
 
@@ -271,15 +293,13 @@ export const browserWait: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const ms = params.ms ? Math.min(params.ms as number, 5000) : undefined;
-            const result = await wait(ctx.page, {
-                selector: params.selector as string | undefined,
-                networkIdle: params.network_idle as boolean | undefined,
-                ms,
-            });
-            return { success: result.success, error: result.error };
+        const ms = params.ms ? Math.min(params.ms as number, 5000) : undefined;
+        const result = await wait(ctx.page, {
+            selector: params.selector as string | undefined,
+            networkIdle: params.network_idle as boolean | undefined,
+            ms,
         });
+        return { success: result.success, error: result.error };
     },
 };
 
@@ -290,14 +310,12 @@ export const browserBack: BrowserTool = {
     description: 'Go back to the previous page in browser history.',
     parameters: {},
     async execute(_params, ctx) {
-        return withScreenshotOnError(ctx, async () => {
-            const result = await goBack(ctx.page);
-            return {
-                success: result.success,
-                data: { url: result.url },
-                error: result.error,
-            };
-        });
+        const result = await goBack(ctx.page);
+        return {
+            success: result.success,
+            data: { url: result.url },
+            error: result.error,
+        };
     },
 };
 
@@ -306,7 +324,7 @@ export const browserBack: BrowserTool = {
 export const browserScreenshot: BrowserTool = {
     name: 'browser_screenshot',
     description:
-        'Take a screenshot of the current page. Use this to visually inspect the page, verify actions worked, or when unsure what to click next.',
+        'Take a screenshot of the current page. Use sparingly — prefer browser_snapshot for understanding page structure. Only use for visual verification.',
     parameters: {
         mode: {
             type: 'string',
@@ -321,15 +339,30 @@ export const browserScreenshot: BrowserTool = {
         },
     },
     async execute(params, ctx) {
-        const result = await takeScreenshot(ctx.page, {
-            mode: (params.mode as 'viewport' | 'full') ?? 'viewport',
-            selector: params.selector as string | undefined,
-        });
-        return {
-            success: result.success,
-            data: { base64: result.base64 },
-            error: result.error,
-        };
+        // Use JPEG with quality 80 to save ~70% tokens compared to PNG
+        const mode = (params.mode as 'viewport' | 'full') ?? 'viewport';
+        try {
+            let buffer: Buffer;
+            if (params.selector) {
+                buffer = await ctx.page.locator(params.selector as string).screenshot({
+                    type: 'jpeg',
+                    quality: 80,
+                });
+            } else {
+                buffer = await ctx.page.screenshot({
+                    type: 'jpeg',
+                    quality: 80,
+                    fullPage: mode === 'full',
+                });
+            }
+            const base64 = buffer.toString('base64');
+            return {
+                success: true,
+                data: { base64: `data:image/jpeg;base64,${base64}` },
+            };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
     },
 };
 
@@ -381,36 +414,27 @@ export const browserExtract: BrowserTool = {
     },
 };
 
-// ─── TOOL 10: browser_read_page ───────────────────────────────────────────────
+// ─── TOOL 10: browser_snapshot ────────────────────────────────────────────────
 
-export const browserReadPage: BrowserTool = {
-    name: 'browser_read_page',
+export const browserSnapshot: BrowserTool = {
+    name: 'browser_snapshot',
     description:
-        'Read the full visible text content of the current page. Use this to understand what is on a page before deciding what to click, or to read product descriptions and reviews.',
-    parameters: {
-        max_words: {
-            type: 'number',
-            description: 'Truncate output to this many words (default: 1000)',
-            required: false,
-        },
-    },
-    async execute(params, ctx) {
+        'Take an accessibility snapshot of the current page. Returns a structured tree of all interactive elements (buttons, links, inputs, etc.) with ref IDs that you can use with browser_click, browser_type, and browser_select. ALWAYS call this after navigating or any action that changes the page.',
+    parameters: {},
+    async execute(_params, ctx) {
         try {
-            const result = await extractPageText(ctx.page);
-            const maxWords = (params.max_words as number) ?? 1000;
+            const result = await takeSnapshot(ctx.page, { maxChars: 12_000 });
 
-            const words = result.text.split(/\s+/);
-            const truncated = words.length > maxWords
-                ? words.slice(0, maxWords).join(' ') + `\n\n[...${words.length - maxWords} more words]`
-                : result.text;
+            // Save refs for this user so click/type/select can use them
+            refStore.saveRefs(ctx.userId, result.refs);
 
             return {
                 success: true,
                 data: {
-                    text: truncated,
+                    snapshot: result.text,
                     url: result.url,
                     title: result.title,
-                    wordCount: result.wordCount,
+                    refCount: result.refs.size,
                 },
             };
         } catch (err: any) {
@@ -499,7 +523,7 @@ export const ALL_BROWSER_TOOLS: BrowserTool[] = [
     browserBack,
     browserScreenshot,
     browserExtract,
-    browserReadPage,
+    browserSnapshot,
     browserTabNew,
     browserTabSwitch,
     browserTabClose,

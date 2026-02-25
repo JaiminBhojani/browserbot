@@ -6,36 +6,43 @@ When given a browsing task, follow these strategies carefully.
 ## Core Loop
 
 For every task, follow this loop:
-1. **Think** — what is the user asking for? What site should I visit?
-2. **Navigate** — go to the right URL
-3. **Observe** — use `browser_read_page` or `browser_screenshot` to understand the page
-4. **Act** — click, type, scroll based on what you see
-5. **Verify** — confirm the action worked before proceeding
+1. **Navigate** — go to the right URL
+2. **Snapshot** — call `browser_snapshot` to see all interactive elements with ref IDs
+3. **Act** — use refs: `browser_click(ref: "e5")`, `browser_type(ref: "e1", text: "...")`
+4. **Re-snapshot** — refs become stale after ANY action; always call `browser_snapshot` again
+5. **Verify** — confirm the action worked
 6. **Report** — give the user a clear, concise summary
+
+## Key Rules — CRITICAL
+
+- **ALWAYS call `browser_snapshot` first** after navigating to any page
+- **Use `ref` for ALL interactions** — this is the most reliable targeting method
+- After EVERY action (click, type, scroll, select), **call `browser_snapshot` again** — refs go stale
+- Only use CSS selectors or text as a fallback if refs don't work
+- Only use `browser_screenshot` when you need to **verify visual layout** — NOT for understanding page content
+- Prefer direct search URLs when possible: `https://flipkart.com/search?q=laptops+under+50000`
 
 ## Starting a Task
 
 - For product searches: go directly to `amazon.in`, `flipkart.com`, or whichever site the user specifies
 - For general searches: use `google.com` then navigate to the best result
-- Always call `browser_read_page` first after landing on a new page — understand before acting
-- If the page looks unexpected, take a `browser_screenshot` to diagnose
+- After navigating, always call `browser_snapshot` — understand what you can interact with
 
 ## Searching for Products
 
 1. Navigate to the site
-2. Find the search box — usually `input[name="q"]`, `#twotabsearchtextbox` (Amazon), or `input[name="q"]` (Flipkart)
-3. Use `browser_type` to enter the search query
-4. Press Enter by typing `\n` at the end of the text, OR use `browser_click` on the search button
-5. Wait for results with `browser_wait` (network_idle: true)
-6. Use `browser_read_page` to see the results list
+2. Call `browser_snapshot` to see the search box ref
+3. Use `browser_type(ref: "eX", text: "search query\n")` to type and submit
+4. Call `browser_snapshot` to see search results with ref IDs
+5. Click on the desired result using its ref
 
 ## Reading Product Pages
 
 When on a product page:
-1. Use `browser_extract` with type `"price"` to get the current price
-2. Use `browser_extract` with type `"reviews"` to get ratings and review text
-3. Use `browser_read_page` for the full product description
-4. Scroll down with `browser_scroll` to load more content if needed
+1. Call `browser_snapshot` to see all interactive elements
+2. Use `browser_extract` with type `"price"` to get the current price
+3. Use `browser_extract` with type `"reviews"` to get ratings and review text
+4. Scroll down with `browser_scroll` + re-snapshot to load more content if needed
 
 ## Review Analysis
 
@@ -49,8 +56,8 @@ When asked "should I buy this?":
 ## Handling Navigation Issues
 
 - If a page doesn't load: try `browser_navigate` again with `wait_until: "load"`
-- If an element isn't found: take a screenshot to see the current page state
-- If a click doesn't work: try using `text` instead of `selector`, or vice versa
+- If an element isn't found: take a `browser_snapshot` to see what refs are available
+- If a click doesn't work via ref: try using `text` instead, or take a `browser_screenshot` for visual inspection
 - If you see a CAPTCHA or bot detection: inform the user immediately, do not attempt to bypass
 - If you get a 404 or error page: go back with `browser_back` and try a different approach
 
@@ -76,3 +83,4 @@ Always end your response with:
 - Never close the browser context yourself — let the system manage that
 - Never loop more than 3 times trying the same failed action — report the issue instead
 - Never share screenshots publicly — they are only for your own analysis
+- Never use `browser_screenshot` as the primary way to understand a page — use `browser_snapshot` instead

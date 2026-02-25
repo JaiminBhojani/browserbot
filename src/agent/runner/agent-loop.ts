@@ -1,7 +1,8 @@
-import { LLMProvider, AgentMessage } from '../providers/base.js';
+import { LLMProvider, AgentMessage, PROVIDER_CATALOG } from '../providers/base.js';
 import { createProviderFromConfig } from '../providers/factory.js';
 import { toolRegistry } from '../tools/registry.js';
 import { browserEngine } from '../../browser/index.js';
+import { truncateToolOutput, guardContext } from '../context-guard.js';
 import { logger } from '../../infra/logger.js';
 import { readFile } from 'fs/promises';
 import { join, dirname } from 'path';
@@ -51,76 +52,14 @@ export class AgentLoop {
         return this.providers[0];
     }
 
-    // Replace ONLY the trimHistory and cleanMessages methods in agent-loop.ts
-
-    private trimHistory(messages: AgentMessage[]): AgentMessage[] {
-        if (messages.length <= 10) return this.cleanContent(messages);
-
-        // Split into "turns" — each turn is a user message + everything until the next user message
-        // This ensures we never split a tool_use / tool_result pair
-        const turns: AgentMessage[][] = [];
-        let current: AgentMessage[] = [];
-
-        for (const m of messages) {
-            if (m.role === 'user' && current.length > 0) {
-                turns.push(current);
-                current = [];
-            }
-            current.push(m);
-        }
-        if (current.length > 0) turns.push(current);
-
-        // Always keep: first turn (original user request) + last 3 turns
-        const kept =
-            turns.length <= 4
-                ? turns
-                : [turns[0], ...turns.slice(-3)];
-
-        const flat = kept.flat();
-        return this.cleanContent(flat);
-    }
-
-    private cleanContent(messages: AgentMessage[]): AgentMessage[] {
-        return messages.map((m, index) => {
-            const isRecent = index >= messages.length - 4;
-            if (isRecent) return m; // keep last 4 messages fully intact
-
-            if (m.role === 'tool') {
-                const content = m.content as any;
-                const resultStr: string = content.content ?? '';
-
-                // Strip screenshots entirely from old messages
-                if (resultStr.includes('"screenshot"') || resultStr.includes('"base64"')) {
-                    return {
-                        ...m,
-                        content: { ...content, content: '{"ok":true,"screenshot":"[removed]"}' },
-                    };
-                }
-
-                // Truncate large page reads
-                if (resultStr.length > 800) {
-                    return {
-                        ...m,
-                        content: {
-                            ...content,
-                            content: resultStr.slice(0, 800) + '…[truncated]',
-                        },
-                    };
-                }
-            }
-
-            // Strip image blocks from old assistant messages
-            if (m.role === 'assistant' && Array.isArray(m.content)) {
-                return {
-                    ...m,
-                    content: (m.content as any[]).map(c =>
-                        c.type === 'image' ? { type: 'text', text: '[image removed]' } : c
-                    ),
-                };
-            }
-
-            return m;
-        });
+    /**
+     * Get the context window size for the active provider.
+     * Used by guardContext to know when to compact.
+     */
+    private getContextWindow(): number {
+        const providerName = this.providers[0].name;
+        const entry = PROVIDER_CATALOG.find(e => e.provider === providerName);
+        return entry?.contextWindow ?? 128_000; // conservative default
     }
 
     private async getSystemPrompt(): Promise<string> {
@@ -228,9 +167,15 @@ export class AgentLoop {
         for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
             log.info({ userId, iteration }, 'Agent iteration');
 
+            // Proactive context guard: compact if approaching token limit
+            const guardedMessages = guardContext(
+                messages,
+                this.getContextWindow()
+            );
+
             const { response, providerUsed: usedThisTurn } = await this.callLLM(
                 systemPrompt,
-                this.trimHistory(messages),
+                guardedMessages,
                 tools
             );
             providerUsed = usedThisTurn;
@@ -287,12 +232,15 @@ export class AgentLoop {
                         ? JSON.stringify(result.data ?? { ok: true })
                         : `ERROR: ${result.error}`;
 
+                    // Truncate large tool outputs to prevent single-tool context bloat
+                    const guardedContent = truncateToolOutput(resultContent);
+
                     messages.push({
                         role: 'tool',
                         content: {
                             tool_call_id: toolCall.id,
                             name: toolCall.name,
-                            content: resultContent,
+                            content: guardedContent,
                         } as any,
                     });
                 }
