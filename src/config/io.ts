@@ -118,13 +118,20 @@ function applyEnvOverrides(config: Record<string, unknown>): void {
   }
 
   // Providers
+  if (env.GROQ_API_KEY) {
+    const providers = ensureObject(config, 'providers') as any;
+    const primary = ensureObject(providers, 'primary');
+    if (primary.provider === 'groq') primary.apiKey = env.GROQ_API_KEY;
+    const fallback = providers.fallback;
+    if (fallback?.provider === 'groq') fallback.apiKey = env.GROQ_API_KEY;
+  }
+
   if (env.ANTHROPIC_API_KEY) {
-    const providers = ensureObject(config, 'providers');
-    const primary = ensureObject(providers, 'primary', {
-      provider: 'anthropic',
-      model: 'claude-sonnet-4-20250514',
-    });
-    primary.apiKey = env.ANTHROPIC_API_KEY;
+    const providers = ensureObject(config, 'providers') as any;
+    const primary = ensureObject(providers, 'primary');
+    if (primary.provider === 'anthropic') primary.apiKey = env.ANTHROPIC_API_KEY;
+    const fallback = providers.fallback;
+    if (fallback?.provider === 'anthropic') fallback.apiKey = env.ANTHROPIC_API_KEY;
   }
 
   // WhatsApp

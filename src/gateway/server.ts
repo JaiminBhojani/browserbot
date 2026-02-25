@@ -6,9 +6,12 @@ import { WhatsAppChannel } from '../channels/whatsapp/whatsapp-adapter.js';
 import { HookEngine } from '../hooks/hook-engine.js';
 import { CommandRegistry } from '../auto-reply/command-registry.js';
 import { dispatch } from '../auto-reply/dispatch.js';
-import { loadConfig, type BrowsBotConfig } from '../config/io.js';
+import { loadConfig } from '../config/io.js';
+import type { BrowsBotConfig } from '../config/schema.js';
 import type { UnifiedMessage } from '../channels/base/message.types.js';
 import { createChildLogger } from '../infra/logger.js';
+import { browserEngine } from '../browser/index.js';
+import { initAgentLoop } from '../agent/runner/agent-loop.js';
 
 const log = createChildLogger('gateway');
 
@@ -20,85 +23,87 @@ export interface GatewayContext {
   wsServer: GatewayWSServer;
 }
 
-/**
- * Start the BrowseBot Gateway Server.
- * This is the single process that owns all state.
- */
 export async function startGateway(configPath?: string): Promise<GatewayContext> {
   log.info('=== BrowseBot Gateway Starting ===');
 
-  // Step 1: Load and validate config
+  // Step 1: Load config
   log.info('Loading configuration...');
   const config = loadConfig(configPath);
   log.info({ port: config.gateway.port }, 'Config loaded');
 
-  // Step 2: Initialize Hook Engine
+  // Step 2: Hook Engine
   log.info('Initializing hook engine...');
   const hookEngine = new HookEngine();
 
-  // Step 3: Initialize Command Registry
+  // Step 3: Command Registry
   log.info('Registering commands...');
   const commandRegistry = new CommandRegistry();
   commandRegistry.registerBuiltins();
 
-  // Step 4: Create HTTP + WebSocket servers
+  // Step 4: HTTP + WebSocket
   log.info('Starting HTTP + WebSocket servers...');
   const app = createHttpApp();
   const httpServer = http.createServer(app);
   const wsServer = new GatewayWSServer();
   wsServer.attach(httpServer);
 
-  // Step 5: Initialize Channel Registry
+  // Step 5: Browser Engine
+  log.info('Starting browser engine...');
+  await browserEngine.start({
+    headless: config.browser.headless,
+    maxContexts: config.browser.maxContexts,
+    navigationTimeoutMs: config.browser.defaultTimeout,
+    idleTimeoutMs: 300_000,
+  });
+
+  // Step 6: Agent Loop — pass full providers config, not just an API key
+  log.info(
+    { provider: config.providers.primary.provider, model: config.providers.primary.model },
+    'Initializing agent loop...'
+  );
+  initAgentLoop({ providers: config.providers });
+
+  // Step 7: Channels
   log.info('Initializing channels...');
   const channelRegistry = new ChannelRegistry();
 
-  // Register WhatsApp channel if enabled
   if (config.channels.whatsapp.enabled) {
     const whatsapp = new WhatsAppChannel(config.channels.whatsapp);
 
-    // Wire up message handler
     whatsapp.onMessage(async (message: UnifiedMessage) => {
-      await dispatch(message, {
-        channelRegistry,
-        hookEngine,
-        onAgentMessage: async (msg) => {
-          // TODO: Replace with actual agent when Phase 3 is built
-          const text = msg.content.text || '';
-          log.info({ text: text.slice(0, 100) }, 'Agent message (echo mode)');
+      const sendReply = async (text: string) => {
+        await whatsapp.sendMessage({
+          channelId: message.senderId,
+          channelType: 'whatsapp',
+          text,
+        });
 
-          // Broadcast to WebSocket clients
-          wsServer.broadcast({
-            type: 'message',
-            from: msg.senderName,
-            channel: msg.channelType,
-            text,
-            timestamp: msg.timestamp,
-          });
+        wsServer.broadcast({
+          type: 'message',
+          from: message.senderName,
+          channel: message.channelType,
+          text: text.slice(0, 200),
+          timestamp: Date.now(),
+        });
+      };
 
-          return `🤖 *Echo Mode*\n\nYou said: "${text}"\n\n_Agent not yet connected. This is Phase 1 — the foundation is working!_`;
-        },
-        onCommand: async (command, args, msg) => {
-          return commandRegistry.execute(command, args, msg);
-        },
-      });
+      await dispatch(message, sendReply);
     });
 
     channelRegistry.register(whatsapp);
   }
 
-  // Step 6: Connect all channels
+  // Step 8: Connect channels
   log.info('Connecting channels...');
   await channelRegistry.connectAll();
 
-  // Step 7: Start listening
+  // Step 9: Start HTTP server
   const { port, host } = config.gateway;
   await new Promise<void>((resolve) => {
-    httpServer.listen(port, host, () => {
-      resolve();
-    });
+    httpServer.listen(port, host, () => resolve());
   });
 
-  // Step 8: Fire gateway start hook
+  // Step 10: Fire startup hook
   await hookEngine.fire('onGatewayStart', { config });
 
   log.info('=== BrowseBot Gateway Ready ===');
@@ -117,6 +122,7 @@ export async function startGateway(configPath?: string): Promise<GatewayContext>
     log.info('Shutting down...');
     await hookEngine.fire('onGatewayStop', {});
     await channelRegistry.disconnectAll();
+    await browserEngine.stop();
     httpServer.close();
     log.info('Goodbye!');
     process.exit(0);
@@ -125,11 +131,5 @@ export async function startGateway(configPath?: string): Promise<GatewayContext>
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  return {
-    config,
-    hookEngine,
-    channelRegistry,
-    commandRegistry,
-    wsServer,
-  };
+  return { config, hookEngine, channelRegistry, commandRegistry, wsServer };
 }

@@ -143,10 +143,32 @@ export class WhatsAppChannel implements Channel {
       for (const msg of event.messages) {
         log.info({ fromMe: msg.key.fromMe, remoteJid: msg.key.remoteJid, id: msg.key.id }, 'Processing message');
 
+        // ── FILTERS ──────────────────────────────────────────────────────────
+        // Skip our own sent messages
         if (msg.key.fromMe) {
           log.debug('Skipping own message');
           continue;
         }
+
+        // Skip WhatsApp Status updates (remoteJid is exactly 'status@broadcast')
+        if (msg.key.remoteJid === 'status@broadcast') {
+          log.debug('Skipping status broadcast');
+          continue;
+        }
+
+        // Skip any other broadcast lists (remoteJid ends with '@broadcast')
+        if (msg.key.remoteJid?.endsWith('@broadcast')) {
+          log.debug({ remoteJid: msg.key.remoteJid }, 'Skipping broadcast list message');
+          continue;
+        }
+
+        // Skip messages with no remoteJid at all (malformed)
+        if (!msg.key.remoteJid) {
+          log.debug('Skipping message with no remoteJid');
+          continue;
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         if (!this.messageHandler) {
           log.warn('No message handler registered!');
           continue;

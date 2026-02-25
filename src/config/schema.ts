@@ -11,7 +11,7 @@ const gatewaySchema = z.object({
 
 // --- AI Provider Config ---
 const providerSchema = z.object({
-  provider: z.enum(['anthropic', 'openai', 'ollama', 'google']),
+  provider: z.enum(['anthropic', 'openai', 'ollama', 'google', 'groq']),
   model: z.string(),
   apiKey: z.string().optional(),
   baseUrl: z.string().optional(),
@@ -20,7 +20,7 @@ const providerSchema = z.object({
 const providersSchema = z.object({
   primary: providerSchema.default({
     provider: 'anthropic',
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-haiku-4-5-20251001',
   }),
   fallback: providerSchema.optional(),
 }).default({});
@@ -51,7 +51,7 @@ const securitySchema = z.object({
   approvalRequired: z.array(z.string()).default(['payment', 'login', 'form_submit']),
   blockedDomains: z.array(z.string()).default([]),
   maxActionsPerRequest: z.number().default(25),
-  approvalTimeout: z.number().default(300), // seconds
+  approvalTimeout: z.number().default(300),
 }).default({});
 
 // --- Memory Config ---
