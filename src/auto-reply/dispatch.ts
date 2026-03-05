@@ -58,15 +58,23 @@ export async function dispatch(
       },
     });
 
-    // Update conversation history, keep it bounded
+    // Update conversation history with the full turn (user + assistant + tool pairs)
+    // CRITICAL: Anthropic requires every tool_use to have a matching tool_result
+    // immediately after. We must keep tool messages in history, not just assistant.
     history.push(
       { role: 'user', content: userText },
-      ...result.updatedHistory.filter((m: any) => m.role === 'assistant')
+      ...result.updatedHistory
     );
 
-    // Trim history if too long
+    // Trim history if too long — remove oldest complete turns
+    // A "turn" is user + assistant + any tool pairs, so trim in chunks
     if (history.length > MAX_HISTORY_TURNS * 2) {
-      history.splice(0, history.length - MAX_HISTORY_TURNS * 2);
+      // Find the start of a user message to avoid splitting mid-turn
+      let cutIndex = history.length - MAX_HISTORY_TURNS * 2;
+      while (cutIndex < history.length && history[cutIndex]?.role !== 'user') {
+        cutIndex++;
+      }
+      history.splice(0, cutIndex);
     }
 
     // Send final response
