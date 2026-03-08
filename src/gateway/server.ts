@@ -12,6 +12,7 @@ import type { UnifiedMessage } from '../channels/base/message.types.js';
 import { createChildLogger } from '../infra/logger.js';
 import { browserEngine } from '../browser/index.js';
 import { initAgentLoop } from '../agent/runner/agent-loop.js';
+import { memoryStore } from '../agent/memory/memory-store.js';
 
 const log = createChildLogger('gateway');
 
@@ -31,7 +32,11 @@ export async function startGateway(configPath?: string): Promise<GatewayContext>
   const config = loadConfig(configPath);
   log.info({ port: config.gateway.port }, 'Config loaded');
 
-  // Step 2: Hook Engine
+  // Step 2: Memory Store
+  log.info('Initializing memory store...');
+  memoryStore.init(config.memory);
+
+  // Step 3: Hook Engine
   log.info('Initializing hook engine...');
   const hookEngine = new HookEngine();
 
@@ -123,6 +128,7 @@ export async function startGateway(configPath?: string): Promise<GatewayContext>
     await hookEngine.fire('onGatewayStop', {});
     await channelRegistry.disconnectAll();
     await browserEngine.stop();
+    memoryStore.close();
     httpServer.close();
     log.info('Goodbye!');
     process.exit(0);

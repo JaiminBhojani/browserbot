@@ -1,18 +1,17 @@
 import { UnifiedMessage } from '../channels/base/message.types.js';
 import { getAgentLoop } from '../agent/runner/agent-loop.js';
+import { memoryStore } from '../agent/memory/memory-store.js';
 import { logger } from '../infra/logger.js';
 
 const log = logger.child({ module: 'dispatch' });
 
 /**
- * In-memory conversation history per user.
- * Key: userId (e.g. "919726235948@s.whatsapp.net")
- * Value: array of AgentMessage turns
+ * Conversation history is now persisted in SQLite via memoryStore.
+ * The in-memory Map is removed — history survives bot restarts.
  *
- * Phase 3 will migrate this to SQLite for persistence across restarts.
+ * For users with memory disabled, getHistory() returns [] and saveMessage()
+ * is a no-op, so behaviour is identical to the old in-memory approach.
  */
-const conversationHistories = new Map<string, any[]>();
-
 const MAX_HISTORY_TURNS = 20;
 
 /**
@@ -37,11 +36,8 @@ export async function dispatch(
     return;
   }
 
-  // Get or create conversation history for this user
-  if (!conversationHistories.has(userId)) {
-    conversationHistories.set(userId, []);
-  }
-  const history = conversationHistories.get(userId)!;
+  // Load persisted conversation history from SQLite
+  const history = memoryStore.getHistory(userId, MAX_HISTORY_TURNS);
 
   try {
     // Let the user know we're working on it
@@ -58,23 +54,12 @@ export async function dispatch(
       },
     });
 
-    // Update conversation history with the full turn (user + assistant + tool pairs)
-    // CRITICAL: Anthropic requires every tool_use to have a matching tool_result
-    // immediately after. We must keep tool messages in history, not just assistant.
-    history.push(
-      { role: 'user', content: userText },
-      ...result.updatedHistory
-    );
-
-    // Trim history if too long — remove oldest complete turns
-    // A "turn" is user + assistant + any tool pairs, so trim in chunks
-    if (history.length > MAX_HISTORY_TURNS * 2) {
-      // Find the start of a user message to avoid splitting mid-turn
-      let cutIndex = history.length - MAX_HISTORY_TURNS * 2;
-      while (cutIndex < history.length && history[cutIndex]?.role !== 'user') {
-        cutIndex++;
-      }
-      history.splice(0, cutIndex);
+    // Persist the user message and final assistant response to SQLite.
+    // We only store text turns (not raw tool call objects) to keep the
+    // DB lean and provider-agnostic.
+    memoryStore.saveMessage(userId, 'user', userText);
+    if (result.finalResponse) {
+      memoryStore.saveMessage(userId, 'assistant', result.finalResponse);
     }
 
     // Send final response
@@ -96,6 +81,6 @@ export async function dispatch(
 
 /** Clear conversation history for a user (e.g. on /reset command) */
 export function clearHistory(userId: string): void {
-  conversationHistories.delete(userId);
+  memoryStore.clearHistory(userId);
   log.info({ userId }, 'Conversation history cleared');
 }

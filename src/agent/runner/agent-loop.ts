@@ -3,6 +3,7 @@ import { createProviderFromConfig } from '../providers/factory.js';
 import { toolRegistry } from '../tools/registry.js';
 import { browserEngine } from '../../browser/index.js';
 import { truncateToolOutput, guardContext } from '../context-guard.js';
+import { memoryStore } from '../memory/memory-store.js';
 import { logger } from '../../infra/logger.js';
 import { readFile } from 'fs/promises';
 import { join, dirname } from 'path';
@@ -42,7 +43,8 @@ export interface AgentRunResult {
  */
 export class AgentLoop {
     private providers: LLMProvider[];
-    private systemPrompt: string | null = null;
+    // System prompt is NOT cached globally anymore — it's rebuilt per user
+    // so that memory context is always fresh for each session.
 
     constructor(primary: LLMProvider, ...fallbacks: LLMProvider[]) {
         this.providers = [primary, ...fallbacks];
@@ -62,29 +64,30 @@ export class AgentLoop {
         return entry?.contextWindow ?? 128_000; // conservative default
     }
 
-    private async getSystemPrompt(): Promise<string> {
-        if (this.systemPrompt) return this.systemPrompt;
-
+    private async getSystemPrompt(userId: string): Promise<string> {
         const [identity, browsing, safety] = await Promise.all([
             readFile(join(TEMPLATES_DIR, 'IDENTITY.md'), 'utf-8').catch(() => ''),
             readFile(join(TEMPLATES_DIR, 'BROWSING.md'), 'utf-8').catch(() => ''),
             readFile(join(TEMPLATES_DIR, 'SAFETY.md'), 'utf-8').catch(() => ''),
         ]);
 
-        this.systemPrompt = [
+        const parts: string[] = [
             identity,
             browsing,
             safety,
             `\nCurrent date/time: ${new Date().toISOString()}`,
-        ]
-            .filter(Boolean)
-            .join('\n\n---\n\n');
+        ].filter(Boolean);
 
-        return this.systemPrompt;
-    }
+        // Inject per-user memory context (preferences + recent activity)
+        // This is done here — NOT via a tool call — so the LLM always has
+        // full context from the very first message of each session.
+        const memoryBlock = memoryStore.buildContextBlock(userId);
+        if (memoryBlock) {
+            parts.push(memoryBlock);
+            log.debug({ userId }, 'Memory context injected into system prompt');
+        }
 
-    clearPromptCache(): void {
-        this.systemPrompt = null;
+        return parts.join('\n\n---\n\n');
     }
 
     /**
@@ -150,7 +153,8 @@ export class AgentLoop {
 
         await browserEngine.getPageForUser(userId);
 
-        const systemPrompt = await this.getSystemPrompt();
+        // Rebuild system prompt per session so memory context is always fresh
+        const systemPrompt = await this.getSystemPrompt(userId);
         const tools = toolRegistry.getToolDefinitions();
 
         const messages: AgentMessage[] = [

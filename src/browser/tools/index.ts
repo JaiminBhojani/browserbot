@@ -10,6 +10,7 @@ import { takeSnapshot } from '../snapshot/snapshot.js';
 import { refStore } from '../snapshot/ref-store.js';
 import { getTabManager } from '../tabs/tab-manager.js';
 import { tabRouter } from '../tabs/tab-router.js';
+import { memoryStore } from '../../agent/memory/memory-store.js';
 import { logger } from '../../infra/logger.js';
 
 const log = logger.child({ module: 'browser-tools' });
@@ -76,6 +77,10 @@ export const browserNavigate: BrowserTool = {
             params.url as string,
             { waitUntil: (params.wait_until as any) ?? 'domcontentloaded' }
         );
+        // Log each navigation to memory so recent activity is available in future sessions
+        if (result.success) {
+            memoryStore.saveSearch(ctx.userId, params.url as string, result.url);
+        }
         return {
             success: result.success,
             data: { url: result.url, title: result.title },
