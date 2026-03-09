@@ -92,6 +92,20 @@ Credential vault for site logins, per-user browser isolation, safety rules that 
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+### 🧠 Persistent Memory
+Conversation history, user preferences, and browsing activity survive bot restarts. Powered by SQLite — the bot remembers you across sessions without needing re-context every time.
+
+</td>
+<td width="50%">
+
+### ⚡ Smart Context Injection
+User preferences and recent activity are **automatically injected** into the LLM system prompt at the start of every session — no tool call needed. The AI knows your context before you say a word.
+
+</td>
+</tr>
 </table>
 
 ---
@@ -262,13 +276,13 @@ graph LR
 1. **WhatsApp** → User sends *"Find laptops under ₹50k on Amazon"*
 2. **Baileys Adapter** → Receives raw message, filters (skip own msgs, broadcasts), converts to `UnifiedMessage`
 3. **Gateway** → Routes to dispatch pipeline, wires up `sendReply` function
-4. **Dispatch** → Loads conversation history, sends "🔍 On it...", calls agent
-5. **Agent Loop** → Loads system prompts (IDENTITY + BROWSING + SAFETY), starts think→act→observe cycle
+4. **Dispatch** → Loads conversation history **from SQLite**, sends "🔍 On it...", calls agent
+5. **Agent Loop** → Builds system prompt: `IDENTITY + BROWSING + SAFETY + 🆕 Memory Context` (preferences + recent activity auto-injected per user)
 6. **LLM** → AI decides: "I should navigate to amazon.in and search"
 7. **Tool Registry** → Dispatches `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`...
 8. **Browser Engine** → Playwright executes each action in user's isolated browser context
 9. **Agent Loop** → AI sees page snapshot, extracts data, decides next step (up to 25 iterations)
-10. **Reply** → Final response sent back through dispatch → WhatsApp → user
+10. **Reply** → Final response sent back through dispatch → **history saved to SQLite** → WhatsApp → user
 
 ### Key Design Decisions
 
@@ -279,6 +293,7 @@ graph LR
 | **Per-user Browser Contexts** | Complete isolation — User A's Amazon login never leaks to User B |
 | **Ref-based Element Targeting** | More reliable than CSS selectors; AI sees `[ref=e5]` in snapshot, uses it to click |
 | **Context Guard** | Proactively compacts history to prevent token overflow during long sessions |
+| **SQLite Memory (per user)** | History + preferences survive restarts; auto-injected into system prompt — LLM has full context from message 1 |
 | **Modular Monolith** | Single process for simplicity, but module boundaries designed for future microservice extraction |
 
 ---
@@ -338,6 +353,9 @@ src/
 │   │   ├── anthropic.ts              # Claude SDK
 │   │   ├── google.ts                 # Gemini SDK
 │   │   └── groq.ts                   # Groq SDK
+│   ├── memory/
+│   │   ├── memory-db.ts              # SQLite singleton (3-table schema)
+│   │   └── memory-store.ts           # MemoryStore — conversations, preferences, searches
 │   ├── prompt/templates/
 │   │   ├── IDENTITY.md               # Bot personality
 │   │   ├── BROWSING.md               # Browser strategy
@@ -355,7 +373,7 @@ src/
 │   ├── vision/                       # Screenshot capture
 │   └── auth/                         # Credential vault
 ├── auto-reply/
-│   ├── dispatch.ts                   # Message → agent routing
+│   ├── dispatch.ts                   # Message → agent routing (DB-backed history)
 │   └── command-registry.ts           # Slash commands
 ├── hooks/hook-engine.ts             # 12 lifecycle hooks
 ├── config/
@@ -447,7 +465,7 @@ pnpm typecheck    # TypeScript type checking
 | **Web Server** | Express 5.1 | Lightweight HTTP layer |
 | **WebSocket** | ws | Real-time client communication |
 | **Validation** | Zod | Runtime config validation |
-| **Database** | better-sqlite3 | Cookie & credential persistence |
+| **Database** | better-sqlite3 | Cookie, credential & **persistent memory** storage (`memory.db`) |
 | **Logging** | Pino + pino-pretty | Structured, fast logging |
 | **Build** | tsdown | Fast ESM bundling |
 | **Testing** | Vitest | Modern, fast test runner |
@@ -477,10 +495,13 @@ pnpm typecheck    # TypeScript type checking
   - System prompt templates & tool dispatch
   - Context guard (token estimation, history compaction)
 
-- [ ] **Phase 4 — Intelligence**
-  - Persistent conversation memory (SQLite)
-  - Vision-based page understanding
-  - Multi-step task planning & orchestration
+- [x] **Phase 4 — Intelligence**
+  - [x] Persistent conversation memory (SQLite — `~/.browsbot/memory.db`)
+  - [x] User preferences & browsing history across sessions
+  - [x] Auto memory context injection into every agent session
+  - [x] Self-pruning DB (capped via `maxHistory` — never grows unbounded)
+  - [ ] Vision-based page understanding
+  - [ ] Multi-step task planning & orchestration
 
 - [ ] **Phase 5 — Security & Hardening**
   - Action approval pipeline for sensitive operations
